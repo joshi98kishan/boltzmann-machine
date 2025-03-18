@@ -9,4 +9,4 @@ Experiments:
 - exp 2 (under progress) is on encoder problem.
 - exp 3 will be on shifter problem.
 
-All these experiments are taken from [extended paper](https://www.cs.utoronto.ca/~hinton/absps/bmtr.pdf) of BM.
+All these experiments are taken from [extended paper](https://www.cs.utoronto.ca/~hinton/absps/bmtr.pdf) on BM.
