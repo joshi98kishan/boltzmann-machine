@@ -2,7 +2,8 @@
 
 [Work In Progress! 🚧]
 
-Understanding the working of boltzmann machine (BM). This repo contains the code for a blog which will be published here (probably next month): [joshi98kishan.github.io](https://joshi98kishan.github.io).
+This repo implements the original boltzmann machine as presented in the paper "A Learning Algorithm for Boltzmann Machines" by Ackley, Hinton and Sejnowski.
+The corresponding blog will be published here (probably next month): [joshi98kishan.github.io](https://joshi98kishan.github.io).
 
 `boltzmann_machine.py` contains the code for Boltzmann Machine.
 
