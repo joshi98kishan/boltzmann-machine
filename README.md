@@ -11,8 +11,10 @@ Experiments:
 - exp 1, `bm_exp1_parity_problem` notebook contains code to train BM for parity problem. It is messy in the current state, need to clean it.
 - exp 2, encoder problem:
     - 4-2-4 encoder: check `bm_424_encoder` notebook (yet to make it clean).
-    - 8-3-8 encoder (under progress)
+    - 4-3-4 encoder 
+    - 8-3-8 encoder 
+    - 40-10-40 encoder
     
-- exp 3 will be on shifter problem.
+- exp 3 (shifter problem - under progress)
 
 All these experiments are taken from [extended paper](https://www.cs.utoronto.ca/~hinton/absps/bmtr.pdf) on BM. Here I am trying to reproduce the results in the paper.

@@ -5,7 +5,7 @@ Implementation of Boltzmann Machine as mentioned in the paper - "A Learning Algo
 import math
 import numpy as np
 from tqdm.notebook import tqdm
-from utils import stringify_vec, get_env_states_ranks
+from utils import stringify_vec, get_env_states_ranks, get_free_run_score, get_clamped_run_score, get_maxCount_hiddState
 
 class BoltzmannMachine:
     def __init__(self, 
@@ -16,11 +16,17 @@ class BoltzmannMachine:
                  noisy_clamping=True, 
                  signed_update=True, 
                  logging=True, 
-                 num_noisyEnvState_per_envState=20,
-                 on_bit_noise = 0.15, 
-                 off_bit_noise = 0.05):
+                 num_noisyEnvState_per_envState=1,
+                 on_bit_noise=0.15, 
+                 off_bit_noise=0.05,
+                 log_freq=None,
+                 save_debug_data=True,
+                 detailed_log = True,
+                 shifterProb_metadata=None,
+                 run_loop_count = 2,
+                 clamped_loop_count = 2):
         '''
-        env_states     : (np array) array of environmental states
+        env_states     : (np array) array of environmental states. This can be `None` for shifter prob.  
         num_hnodes     : (int) number of hidden nodes
         init_W         : (np array) initial weight array, helpful for continuing the learning
         weight_mask    : (np array) represents connections to avoid, e.g. in encoder problem
@@ -30,6 +36,11 @@ class BoltzmannMachine:
         num_noisyEnvState_per_envState: (int) number of noisy states to create from a single env states, if noisy clamping is True
         on_bit_noise   : (float) probability to toggle on bit 
         off_bit_noise  : (float) probability to toggle off bit
+        log_freq       : (int) log after every this many number of cycles. If None, then log in every cycle
+        save_debug_data: (bool) whether to save debug data
+        detailed_log   : (bool) whether to log detailed information 
+        shifterProb_metadata : (dict) metadata for shifter problem, like batchsize etc.
+        run_loop_count : ..........
 
         Note: this code uses "state" term for two kinds of states - environmental states (corresponding to visible nodes)
         and network states (corresponding to all the nodes). And it should be clear from the context.  
@@ -37,11 +48,23 @@ class BoltzmannMachine:
     
         self.rng = np.random.default_rng()
         self.env_states = env_states
-        self.num_vnodes = env_states.shape[1]
         self.num_hnodes = num_hnodes
         self.signed_update = signed_update
         self.logging = logging
-
+        self.log_freq = log_freq
+        self.save_debug_data = save_debug_data
+        self.detailed_log = detailed_log
+        self.shifterProb_metadata = shifterProb_metadata
+        self.run_loop_count = run_loop_count
+        self.clamped_loop_count = clamped_loop_count
+        
+        if self.shifterProb_metadata is None:
+            self.is_shifterProb = False
+            self.num_vnodes = self.env_states.shape[1]
+        else:
+            self.is_shifterProb = True
+            self.num_vnodes = 2*self.shifterProb_metadata['vis_grp_size'] + 3
+        
         # variables for noisy clamping
         self.noisy_clamping = noisy_clamping
         self.num_noisyEnvState_per_envState = num_noisyEnvState_per_envState
@@ -49,7 +72,10 @@ class BoltzmannMachine:
         self.off_bit_noise = off_bit_noise
 
         # as mentioned in the paper, "co-occurrences were then gathered for as ```many annealings``` as were used to estimate pij."
-        self.num_freeRun_inits = self.num_noisyEnvState_per_envState*self.env_states.shape[0]
+        if self.is_shifterProb:
+            self.num_freeRun_inits = self.shifterProb_metadata['batch_size'] # *self.clamped_loop_count, haven't experimented with this yet.
+        else:
+            self.num_freeRun_inits = int(self.num_noisyEnvState_per_envState*self.env_states.shape[0]*self.clamped_loop_count)
     
         # last node is for conversion of bias to weights
         self.num_nodes = self.num_vnodes + self.num_hnodes + 1 
@@ -66,7 +92,6 @@ class BoltzmannMachine:
         self.weight_update_magnitude = 2
 
         # variables to store data for visualization
-        self.energy_change_debug = []
         self.clamped_run_debug = []
         self.free_run_debug = []
         self.learning_debug = []
@@ -95,6 +120,20 @@ class BoltzmannMachine:
 
         noisy_env_states = np.array(noisy_env_states)
         return noisy_env_states
+    
+    def get_shifterProb_batch(self):
+        rand_nos = self.rng.uniform(0, 1, size=(self.shifterProb_metadata['batch_size'], 
+                                                self.shifterProb_metadata['vis_grp_size']))
+        first_group = (rand_nos<self.shifterProb_metadata['on_bit_prob']).astype(int)
+        
+        rand_shift = self.rng.choice([-1, 0, 1], size=1)[0]
+        shift_label_arr = np.zeros((self.shifterProb_metadata['batch_size'], 3), dtype=int)
+        shift_label_arr[:, rand_shift+1] = 1
+        
+        second_group = np.roll(first_group, shift=rand_shift, axis=1)
+
+        batch = np.concatenate((first_group, second_group, shift_label_arr), axis=1)
+        return batch
             
     def get_rand_init_state(self, env_state=None):
         '''
@@ -126,7 +165,6 @@ class BoltzmannMachine:
         for _ in range(len(idxs)):
             i = self.rng.choice(idxs, 1).item()
             energy_change = np.dot(self.W[i][:], init_state)
-            self.energy_change_debug.append(energy_change)
 
             p_of_1 = self.sigmoid(energy_change, T)
             
@@ -150,8 +188,8 @@ class BoltzmannMachine:
 
         equi_samples = []
 
-        # as mentioned in the paper, network was allowed to reach equilibrium twice.
-        for _ in range(2):
+        # as mentioned in the paper, network was allowed to reach equilibrium twice. This loop is not necessary now, as this is now handled via `clamped_loop_count` and `num_freeRun_inits`.
+        for _ in range(self.run_loop_count):
             # SA
             for times, T in self.sa_sched:
                 for _ in range(times):
@@ -171,7 +209,6 @@ class BoltzmannMachine:
         #********* all the nodes are unclamped
         idxs = np.arange(self.num_vnodes + self.num_hnodes)
         #*********
-
         equi_samples = []
     
         for _ in range(self.num_freeRun_inits):
@@ -182,7 +219,9 @@ class BoltzmannMachine:
         p_prime = (equi_samples.T@equi_samples)/equi_samples.shape[0]
 
         dist = self.create_states_dist(equi_samples)
-        self.free_run_debug.append(dist)
+        
+        if self.save_debug_data:
+            self.free_run_debug.append(dist)
         
         if self.logging:
             self.free_run_eval(dist)
@@ -195,49 +234,56 @@ class BoltzmannMachine:
         '''
 
         equi_samples = []
-        
-        # this list stores the "dist" dictionary for each env state 
-        debug_list = [] 
+        debug_list = [] # this list stores the "dist" dictionary for each env state  
+        idxs = np.arange(self.num_vnodes, self.num_vnodes+self.num_hnodes) # only hidden nodes are unclamped
 
-        if self.noisy_clamping:
-            states_to_clamp = self.get_noisy_env_states()
+        if self.is_shifterProb:
+            states_to_clamp = self.get_shifterProb_batch()
+            if self.env_states is None:
+                self.env_states = states_to_clamp ## used when evaluating free run
         else:
-            states_to_clamp = self.env_states
+            if self.noisy_clamping:
+                states_to_clamp = self.get_noisy_env_states()
+            else:
+                states_to_clamp = self.env_states
+
 
         for state_to_clamp in states_to_clamp:
-            init_state = self.get_rand_init_state(state_to_clamp)
-            #********* only hidden nodes are unclamped
-            idxs = np.arange(self.num_vnodes, self.num_vnodes+self.num_hnodes)
-            #*********
-            clamped_equi_samples = self.run(init_state, idxs)
+            clamped_equi_samples = []
+
+            for _ in range(self.clamped_loop_count):
+                init_state = self.get_rand_init_state(state_to_clamp)
+                clamped_equi_samples.extend(self.run(init_state, idxs)) 
+
             equi_samples.extend(clamped_equi_samples)
 
-            if not self.noisy_clamping:
+            if self.is_shifterProb or not self.noisy_clamping:
                 dist = self.create_states_dist(np.array(clamped_equi_samples))
                 debug_list.append(dist)
-                if self.logging:
+                if self.logging and self.detailed_log:
                     self.clamped_run_eval(dist) # such print is particularly helpful for encoder problems
 
 
-        if self.noisy_clamping:
+        if not self.is_shifterProb and self.noisy_clamping:
             for state_to_clamp in self.env_states:
                 init_state = self.get_rand_init_state(state_to_clamp)
-                #*********
-                idxs = np.arange(self.num_vnodes, self.num_vnodes+self.num_hnodes)
-                #*********
                 clamped_equi_samples = self.run(init_state, idxs)
                 
                 dist = self.create_states_dist(np.array(clamped_equi_samples))
                 debug_list.append(dist)
                 
-                if self.logging:
+                if self.logging and self.detailed_log:
                     self.clamped_run_eval(dist)
 
 
         equi_samples = np.array(equi_samples)
         p = (equi_samples.T@equi_samples)/equi_samples.shape[0]
 
-        self.clamped_run_debug.append(debug_list)
+        if self.save_debug_data:
+            self.clamped_run_debug.append(debug_list)
+
+        if self.logging and not self.detailed_log:
+            print(get_clamped_run_score(debug_list, self.num_hnodes), end=' ------ ')
 
         return p
     
@@ -267,7 +313,14 @@ class BoltzmannMachine:
         learning of weights
         '''
         
-        for _ in tqdm(range(learning_cycles)):
+        for i in tqdm(range(learning_cycles)):
+
+            if self.log_freq is not None:
+                if (i%self.log_freq)==0:
+                    self.logging=True
+                else:
+                    self.logging=False
+
             p = self.clamped_run()
             p_prime = self.free_run()
             
@@ -282,12 +335,13 @@ class BoltzmannMachine:
             if self.weight_mask is not None:
                 direction[self.weight_mask] = 0
 
-            self.learning_debug.append({
-                'W': self.W,
-                'p': p, 
-                'p_prime': p_prime, 
-                'direction': direction, 
-            })
+            if self.save_debug_data:
+                self.learning_debug.append({
+                    'W': self.W,
+                    'p': p, 
+                    'p_prime': p_prime, 
+                    'direction': direction, 
+                })
             
             #WEIGHT UPDATE
             self.W = self.W + direction*self.weight_update_magnitude
@@ -321,29 +375,31 @@ class BoltzmannMachine:
         '''
         prints rank of env states in the sorted (by energy) states array.
         '''
+        if self.detailed_log:
+            # sort dist states by energy
+            sorted_energies = np.array(sorted(zip(dist['state_energies'], 
+                                                np.arange(len(dist['state_energies']))), 
+                                            key=lambda x: x[0])
+                                    )
+            
+            sorted_states = dist['states'][sorted_energies[:, 1].astype(int)]
 
-        # sort dist states by energy
-        sorted_energies = np.array(sorted(zip(dist['state_energies'], 
-                                              np.arange(len(dist['state_energies']))), 
-                                          key=lambda x: x[0])
-                                  )
-        
-        sorted_states = dist['states'][sorted_energies[:, 1].astype(int)]
+            # printing the ranks of env states in the sorted states array
+            log = get_env_states_ranks(self.env_states, sorted_states, self.num_vnodes)
 
-        # printing the ranks of env states in the sorted states array
-        ranks = get_env_states_ranks(self.env_states, sorted_states, self.num_vnodes)
-        ranks = sorted(ranks)
+        else:
+            log = get_free_run_score(dist, self.env_states, self.num_vnodes)
 
         if print_eval:
-            print(ranks)
+            print(log, f'W_range: ({self.W.min()}, {self.W.max()})')
     
-        return ranks
+        return log
 
     def clamped_run_eval(self, dist, print_eval=True):
         '''
         print the hidden state corresponding to most frequent occuring network state in the distribution
         '''
-        max_count_hid_state = dist['states'][dist['state_counts'].argmax()][-1-self.num_hnodes:-1]
+        max_count_hid_state = get_maxCount_hiddState(dist, self.num_hnodes)
     
         if print_eval:
             print(max_count_hid_state, end=', ')

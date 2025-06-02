@@ -38,7 +38,7 @@ def get_encprob_env_states(grp_size):
 
     return np.array(env_states, dtype=int)
 
-def get_encprob_weight_mask(grp_size, num_hnodes):
+def get_encprob_weight_mask(grp_size, num_hnodes, winner_takeAll_stage=False):
     '''
     returns a mask with shape same as weights array with "True"
     representing the connections to avoid.
@@ -46,11 +46,26 @@ def get_encprob_weight_mask(grp_size, num_hnodes):
     num_vnodes = 2*grp_size 
     num_nodes = num_vnodes + num_hnodes + 1
     mask = np.zeros((num_nodes, num_nodes), dtype=bool)
+
     mask[:grp_size, grp_size:num_vnodes] = True
     mask[grp_size:num_vnodes, :grp_size] = True
     mask[num_vnodes:num_vnodes+num_hnodes, num_vnodes:num_vnodes+num_hnodes] = True
+
+    if winner_takeAll_stage:
+        mask[:num_vnodes, num_vnodes:num_vnodes+num_hnodes] = True
+        mask[num_vnodes:num_vnodes+num_hnodes, :num_vnodes] = True
+        mask[num_vnodes:num_vnodes+num_hnodes, -1] = True
+
     return mask
 
+def get_shiftprob_weight_mask(grp_size, num_hnodes):
+    num_vnodes = 2*grp_size + 3 
+    num_nodes = num_vnodes + num_hnodes + 1
+    mask = np.zeros((num_nodes, num_nodes), dtype=bool)
+    
+    mask[num_vnodes:num_vnodes+num_hnodes, num_vnodes:num_vnodes+num_hnodes] = True
+
+    return mask
 
 
 def gen_free_state_dist_pdf(bm, pdf_name, maxnum_bars=15):
@@ -116,14 +131,6 @@ def gen_free_state_dist_pdf(bm, pdf_name, maxnum_bars=15):
             pdf.savefig()  # Save the current figure into the PDF
             plt.close()  # Close the figure
 
-
-def get_env_states_ranks(env_states, uniq_sorted_states, num_vnodes):
-    ranks = []
-    for env_state in env_states:
-        mask = (uniq_sorted_states[:, :num_vnodes] == env_state).all(axis=1)
-        ranks.extend(np.nonzero(mask)[0])
-
-    return ranks
 
 def gen_clamped_state_dist_pdf(bm, pdf_name, ):
     with PdfPages(pdf_name) as pdf:
@@ -202,4 +209,103 @@ def generate_binary_vectors(n):
         helper(current_vector + [1], length + 1)
     
     helper([], 0)
-    return result
+    return np.array(result)
+
+def get_env_states_ranks(env_states, uniq_sorted_states, num_vnodes):
+    ranks = []
+    for env_state in env_states:
+        mask = (uniq_sorted_states[:, :num_vnodes] == env_state).all(axis=1)
+        ranks.extend(np.nonzero(mask)[0])
+
+    return sorted(ranks)
+
+def get_free_run_score(free_run_dist, env_states, num_vnodes):
+    num_env_states = env_states.shape[0]
+
+    sorted_energies = np.array(sorted(zip(free_run_dist['state_energies'], 
+                                            np.arange(len(free_run_dist['state_energies']))), 
+                                        key=lambda x: x[0])
+                                )
+    sorted_states = free_run_dist['states'][sorted_energies[:, 1].astype(int)]
+    
+    res = []
+    for env_state in env_states:
+        mask = (sorted_states[:num_env_states, :num_vnodes] == env_state).all(axis=1)
+        res.append(mask.any())
+
+    return np.array(res).sum()
+
+def get_free_run_scores(bm):
+    free_run_scores = []
+    num_env_states = bm.env_states.shape[0]
+
+    for free_run_dist in bm.free_run_debug:
+        sorted_energies = np.array(sorted(zip(free_run_dist['state_energies'], 
+                                                np.arange(len(free_run_dist['state_energies']))), 
+                                            key=lambda x: x[0])
+                                    )
+
+
+        is_energy_lower = (sorted_energies[num_env_states-1, 0]<sorted_energies[num_env_states, 0])
+
+        if (get_free_run_score(free_run_dist, bm.env_states, bm.num_vnodes)==num_env_states) and is_energy_lower:
+            free_run_scores.append(True)
+        else:
+            free_run_scores.append(False)
+
+    return np.array(free_run_scores)
+
+def get_maxCount_hiddState(clamped_dist, num_hnodes):
+    return clamped_dist['states'][clamped_dist['state_counts'].argmax()][-1-num_hnodes:-1]
+
+def get_clamped_run_score(clamped_debug_list, num_hnodes):
+    env_hidd_states = []
+    for clamped_dist in clamped_debug_list:
+        max_count_hidd_state = get_maxCount_hiddState(clamped_dist, num_hnodes)
+        env_hidd_states.append(max_count_hidd_state)
+
+    score = len(np.unique(env_hidd_states, axis=0))
+    return score
+
+def get_clamped_run_scores(bm):
+    '''
+    return number of unique hidden states in each cycle.
+    '''
+    uniqs_len_list = []
+    for clamped_debug_list in (bm.clamped_run_debug):
+        uniqs_len_list.append(get_clamped_run_score(clamped_debug_list, bm.num_hnodes))
+
+    return np.array(uniqs_len_list)
+
+def get_shifterProb_envStates(grp_size):
+    env_states = []
+    first_grp = generate_binary_vectors(grp_size)
+    
+    for shift in [-1, 0, 1]:
+        sec_grp = np.roll(first_grp, shift=shift, axis=1)
+        
+        shift_label_arr = np.zeros((first_grp.shape[0], 3), dtype=int)
+        shift_label_arr[:, shift+1] = 1
+
+        env_states.extend(np.concatenate((first_grp, sec_grp, shift_label_arr), axis=1))
+
+    env_states = np.array(env_states)
+    return env_states
+
+
+def parity_problem_testing(env_states, bm):
+    test_res = []
+    for query in env_states:
+        query = query.copy()
+        ans = query[2]
+        query[2] = -1
+        print(query, end=', ')
+
+        res = bm.search(query)
+        uniqs, uniqs_counts = np.unique(res[:, 2], return_counts=True)
+        pred = uniqs[np.argmax(uniqs_counts)]
+        is_correct = (pred==ans)
+        print(uniqs, uniqs_counts, is_correct)
+        test_res.append(is_correct)
+
+    print(f'Result: {sum(test_res)}/4')
